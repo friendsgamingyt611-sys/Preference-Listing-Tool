@@ -5,14 +5,39 @@ import { ArrowUp, ArrowDown, Trash2, Upload } from "lucide-react";
 function normalizeString(str: string): string {
   return str
     .toLowerCase()
-    .replace(/["',.\(\)\-\[\]]/g, "") // remove quotes, commas, dots, parens, hyphens, brackets
-    .replace(/\s+/g, " ")             // replace multiple spaces with single space
+    .replace(/\b4\s*years?\b/g, " ")
+    .replace(/\b5\s*years?\b/g, " ")
+    .replace(/\bbachelor\s+of\s+technology\b/g, " btech ")
+    .replace(/\bb\.?\s*tech\b/g, " btech ")
+    .replace(/\bbachelor\s+of\s+architecture\b/g, " barch ")
+    .replace(/\bb\.?\s*arch\b/g, " barch ")
+    .replace(/\bmaster\s+of\s+technology\b/g, " mtech ")
+    .replace(/\bm\.?\s*tech\b/g, " mtech ")
+    .replace(/["',.\(\)\-\[\]]/g, " ") // replace punctuation with space
+    .replace(/\s+/g, " ")              // replace multiple spaces with single space
     .trim();
 }
 
-function parseRowItem(line: string): { institution: string; branch: string; primaryKey: string; altKey: string } {
+function stripDegreeTerms(str: string): string {
+  return str
+    .replace(/\bbtech\b/g, "")
+    .replace(/\bbarch\b/g, "")
+    .replace(/\bmtech\b/g, "")
+    .replace(/\bdual\s+degree\b/g, "")
+    .replace(/\bintegrated\b/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function parseRowItem(line: string): {
+  institution: string;
+  branch: string;
+  primaryKey: string;
+  coreKey: string;
+  altKey: string;
+} {
   const trimmed = line.trim();
-  if (!trimmed) return { institution: "", branch: "", primaryKey: "", altKey: "" };
+  if (!trimmed) return { institution: "", branch: "", primaryKey: "", coreKey: "", altKey: "" };
 
   let fields: string[] = [];
 
@@ -53,17 +78,25 @@ function parseRowItem(line: string): { institution: string; branch: string; prim
       br = fields[1];
     }
   } else if (fields.length === 1) {
-    const cleanLine = fields[0].replace(/^\d+[\.\s\-]+/, "").trim();
-    inst = cleanLine;
+    const raw = fields[0].replace(/^\d+[\.\s\-]+/, "").trim();
+    const parenMatch = raw.match(/^([^\(\)]+)\s*\((.+)\)$/);
+    if (parenMatch) {
+      inst = parenMatch[1].trim();
+      br = parenMatch[2].trim();
+    } else {
+      inst = raw;
+    }
   }
 
   const normInst = normalizeString(inst);
   const normBr = normalizeString(br);
+  const coreBr = stripDegreeTerms(normBr);
   const normFull = normalizeString(trimmed.replace(/^\d+[\.\s\-]+/, ""));
 
   const primaryKey = normBr ? `${normInst}___${normBr}` : normInst;
+  const coreKey = coreBr ? `${normInst}___${coreBr}` : normInst;
 
-  return { institution: inst, branch: br, primaryKey, altKey: normFull };
+  return { institution: inst, branch: br, primaryKey, coreKey, altKey: normFull };
 }
 
 interface PreferenceTableProps {
@@ -155,6 +188,7 @@ export default function PreferenceTable({
     matched: number;
     unmatched: number;
     total: number;
+    targetCount: number;
     unmatchedItems: string[];
     targetMissingItems: string[];
   } | null>(null);
@@ -185,18 +219,24 @@ export default function PreferenceTable({
       return;
     }
 
-    // Map of normalized key -> array of 0-based indices in Target List A
+    interface TargetMeta {
+      idx: number;
+      normInst: string;
+      normBr: string;
+      coreBr: string;
+      primaryKey: string;
+      coreKey: string;
+      altKey: string;
+      rawText: string;
+    }
+
+    const targetItems: TargetMeta[] = [];
     const aIndicesMap: { [key: string]: number[] } = {};
 
-    const addTargetItem = (primaryKey: string, altKey: string, idx: number) => {
-      if (primaryKey) {
-        if (!aIndicesMap[primaryKey]) aIndicesMap[primaryKey] = [];
-        aIndicesMap[primaryKey].push(idx);
-      }
-      if (altKey && altKey !== primaryKey) {
-        if (!aIndicesMap[altKey]) aIndicesMap[altKey] = [];
-        aIndicesMap[altKey].push(idx);
-      }
+    const addKeyToMap = (key: string, idx: number) => {
+      if (!key) return;
+      if (!aIndicesMap[key]) aIndicesMap[key] = [];
+      if (!aIndicesMap[key].includes(idx)) aIndicesMap[key].push(idx);
     };
 
     if (useAppTableForA) {
@@ -207,56 +247,118 @@ export default function PreferenceTable({
       preferences.forEach((pref, idx) => {
         const normInst = normalizeString(pref.institution);
         const normBr = normalizeString(pref.branch);
+        const coreBr = stripDegreeTerms(normBr);
         const primaryKey = normBr ? `${normInst}___${normBr}` : normInst;
+        const coreKey = coreBr ? `${normInst}___${coreBr}` : normInst;
         const altKey = normalizeString(`${pref.institution} ${pref.branch}`);
-        addTargetItem(primaryKey, altKey, idx);
+        targetItems.push({
+          idx,
+          normInst,
+          normBr,
+          coreBr,
+          primaryKey,
+          coreKey,
+          altKey,
+          rawText: `${pref.institution} (${pref.branch})`,
+        });
+        addKeyToMap(primaryKey, idx);
+        addKeyToMap(coreKey, idx);
+        addKeyToMap(altKey, idx);
       });
     } else {
       const linesA = matcherListA.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
       linesA.forEach((line, idx) => {
         const parsed = parseRowItem(line);
-        addTargetItem(parsed.primaryKey, parsed.altKey, idx);
+        const normInst = normalizeString(parsed.institution);
+        const normBr = normalizeString(parsed.branch);
+        const coreBr = stripDegreeTerms(normBr);
+        targetItems.push({
+          idx,
+          normInst,
+          normBr,
+          coreBr,
+          primaryKey: parsed.primaryKey,
+          coreKey: parsed.coreKey,
+          altKey: parsed.altKey,
+          rawText: line,
+        });
+        addKeyToMap(parsed.primaryKey, idx);
+        addKeyToMap(parsed.coreKey, idx);
+        addKeyToMap(parsed.altKey, idx);
       });
     }
 
     // Process List B lines
-    const linesB = matcherListB.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+    const linesB = matcherListB.split(/\r?\n/).filter(l => l.trim().length > 0);
 
     const reorderPositions: (number | string)[] = [];
     let matchedCount = 0;
     let unmatchedCount = 0;
+    let unmatchedCounter = 0;
+    const targetCount = targetItems.length;
     const unmatchedItems: string[] = [];
     const matchedAIndices = new Set<number>();
-
-    const currentKeyPointer: { [key: string]: number } = {};
 
     linesB.forEach((bLine) => {
       const parsedB = parseRowItem(bLine);
 
-      // Try primary key first, then altKey
-      let indices = aIndicesMap[parsedB.primaryKey];
-      let matchedKey = parsedB.primaryKey;
+      // Try exact key matches first
+      const candidateKeys = [parsedB.primaryKey, parsedB.coreKey, parsedB.altKey];
+      let matchedAIdx = -1;
 
-      if (!indices || indices.length === 0) {
-        indices = aIndicesMap[parsedB.altKey];
-        matchedKey = parsedB.altKey;
+      for (const key of candidateKeys) {
+        if (!key) continue;
+        const indices = aIndicesMap[key];
+        if (indices && indices.length > 0) {
+          // Find first unused target index
+          for (const idx of indices) {
+            if (!matchedAIndices.has(idx)) {
+              matchedAIdx = idx;
+              break;
+            }
+          }
+        }
+        if (matchedAIdx !== -1) break;
       }
 
-      if (indices && indices.length > 0) {
-        const ptr = currentKeyPointer[matchedKey] || 0;
-        if (ptr < indices.length) {
-          const aIndex = indices[ptr];
-          reorderPositions.push(aIndex + 1);
-          currentKeyPointer[matchedKey] = ptr + 1;
-          matchedCount++;
-          matchedAIndices.add(aIndex);
-        } else {
-          reorderPositions.push("");
-          unmatchedCount++;
-          unmatchedItems.push(bLine);
+      // Fallback fuzzy match if no key matched yet
+      if (matchedAIdx === -1 && parsedB.institution) {
+        const normBInst = normalizeString(parsedB.institution);
+        const normBBr = normalizeString(parsedB.branch);
+        const coreBBr = stripDegreeTerms(normBBr);
+
+        for (const tItem of targetItems) {
+          if (matchedAIndices.has(tItem.idx)) continue;
+
+          const instMatches =
+            tItem.normInst === normBInst ||
+            tItem.normInst.includes(normBInst) ||
+            normBInst.includes(tItem.normInst);
+
+          if (instMatches) {
+            const brMatches =
+              !tItem.coreBr ||
+              !coreBBr ||
+              tItem.coreBr === coreBBr ||
+              tItem.coreBr.includes(coreBBr) ||
+              coreBBr.includes(tItem.coreBr);
+
+            if (brMatches) {
+              matchedAIdx = tItem.idx;
+              break;
+            }
+          }
         }
+      }
+
+      if (matchedAIdx !== -1) {
+        reorderPositions.push(matchedAIdx + 1);
+        matchedAIndices.add(matchedAIdx);
+        matchedCount++;
       } else {
-        reorderPositions.push("");
+        unmatchedCounter++;
+        const assignedSequentialIndex = targetCount + unmatchedCounter;
+        reorderPositions.push(assignedSequentialIndex);
         unmatchedCount++;
         unmatchedItems.push(bLine);
       }
@@ -264,26 +366,22 @@ export default function PreferenceTable({
 
     // Find target items that were missing in List B
     const targetMissingItems: string[] = [];
-    if (useAppTableForA) {
-      preferences.forEach((pref, idx) => {
-        if (!matchedAIndices.has(idx)) {
-          targetMissingItems.push(`Choice #${idx + 1}: ${pref.institution} (${pref.branch})`);
+    targetItems.forEach((tItem) => {
+      if (!matchedAIndices.has(tItem.idx)) {
+        if (useAppTableForA) {
+          targetMissingItems.push(`Choice #${tItem.idx + 1}: ${tItem.rawText}`);
+        } else {
+          targetMissingItems.push(`Line #${tItem.idx + 1}: ${tItem.rawText}`);
         }
-      });
-    } else {
-      const linesA = matcherListA.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
-      linesA.forEach((line, idx) => {
-        if (!matchedAIndices.has(idx)) {
-          targetMissingItems.push(`Line #${idx + 1}: ${line}`);
-        }
-      });
-    }
+      }
+    });
 
     setMatcherOutput(reorderPositions.join("\n"));
     setMatcherStats({
       matched: matchedCount,
       unmatched: unmatchedCount,
       total: linesB.length,
+      targetCount,
       unmatchedItems,
       targetMissingItems,
     });
@@ -855,11 +953,13 @@ export default function PreferenceTable({
                                   <div className="border border-amber-300 bg-amber-50/90 text-amber-950 p-2.5 text-[11px] rounded flex flex-col gap-2">
                                     <div className="font-bold uppercase text-[11px] text-amber-900 flex items-center justify-between border-b border-amber-200 pb-1">
                                       <span>⚠️ Warning: {matcherStats.unmatched} Item{matcherStats.unmatched > 1 ? "s" : ""} Missing from Target</span>
-                                      <span className="text-[10px] bg-amber-200 text-amber-900 font-mono px-1.5 py-0.5 rounded">Blank Index Assigned</span>
+                                      <span className="text-[10px] bg-amber-200 text-amber-900 font-mono px-1.5 py-0.5 rounded">
+                                        Appended as #{matcherStats.targetCount + 1}+
+                                      </span>
                                     </div>
 
                                     <p className="leading-snug text-[10.5px] text-amber-900">
-                                      The following item{matcherStats.unmatched > 1 ? "s" : ""} in your uploaded indexed CSV were not found in your target preference list (likely deleted from your target). They have been assigned <strong>blank serial numbers</strong> so all remaining matching rows reorder accurately.
+                                      The following item{matcherStats.unmatched > 1 ? "s" : ""} in your uploaded indexed CSV were not found in your target preference list (likely deleted from your target). They have been assigned sequential numbers continuing directly after your target list (<strong>#{matcherStats.targetCount + 1}, #{matcherStats.targetCount + 2}, ...</strong>) preserving their original relative order. When sorted <strong>ASCENDING</strong> in your master spreadsheet, all valid target choices (1 to {matcherStats.targetCount}) sort to the top, and deleted/extra choices smoothly append directly below them.
                                     </p>
 
                                     <div className="max-h-24 overflow-y-auto font-mono text-[10px] bg-white border border-amber-200 p-1 divide-y divide-amber-100 text-slate-800 rounded-sm">
@@ -876,7 +976,7 @@ export default function PreferenceTable({
                                       </div>
                                       <div className="flex flex-col gap-1 pl-1">
                                         <div>
-                                          <strong className="text-amber-900">Option 1 (Clean Master CSV):</strong> Manually delete these {matcherStats.unmatched} row{matcherStats.unmatched > 1 ? "s" : ""} from your master CSV/spreadsheet so that all rows align perfectly without blank index gaps.
+                                          <strong className="text-amber-900">Option 1 (Clean Master CSV):</strong> Delete these {matcherStats.unmatched} row{matcherStats.unmatched > 1 ? "s" : ""} (which will sort to positions #{matcherStats.targetCount + 1}+ at the end) from your master spreadsheet if you no longer need them.
                                         </div>
                                         <div>
                                           <strong className="text-amber-900">Option 2 (Restore to Target):</strong> {useAppTableForA ? (
@@ -1358,11 +1458,13 @@ export default function PreferenceTable({
                         <div className="border border-amber-300 bg-amber-50/90 text-amber-950 p-2.5 text-[11px] rounded flex flex-col gap-2">
                           <div className="font-bold uppercase text-[11px] text-amber-900 flex items-center justify-between border-b border-amber-200 pb-1">
                             <span>⚠️ Warning: {matcherStats.unmatched} Item{matcherStats.unmatched > 1 ? "s" : ""} Missing from Target</span>
-                            <span className="text-[10px] bg-amber-200 text-amber-900 font-mono px-1.5 py-0.5 rounded">Blank Index Assigned</span>
+                            <span className="text-[10px] bg-amber-200 text-amber-900 font-mono px-1.5 py-0.5 rounded">
+                              Appended as #{matcherStats.targetCount + 1}+
+                            </span>
                           </div>
 
                           <p className="leading-snug text-[10.5px] text-amber-900">
-                            The following item{matcherStats.unmatched > 1 ? "s" : ""} in your uploaded indexed CSV were not found in your target preference list (likely deleted from your target). They have been assigned <strong>blank serial numbers</strong> so all remaining matching rows reorder accurately.
+                            The following item{matcherStats.unmatched > 1 ? "s" : ""} in your uploaded indexed CSV were not found in your target preference list (likely deleted from your target). They have been assigned sequential numbers continuing directly after your target list (<strong>#{matcherStats.targetCount + 1}, #{matcherStats.targetCount + 2}, ...</strong>) preserving their original relative order. When sorted <strong>ASCENDING</strong> in your master spreadsheet, all valid target choices (1 to {matcherStats.targetCount}) sort to the top, and deleted/extra choices smoothly append directly below them.
                           </p>
 
                           <div className="max-h-24 overflow-y-auto font-mono text-[10px] bg-white border border-amber-200 p-1 divide-y divide-amber-100 text-slate-800 rounded-sm">
@@ -1379,7 +1481,7 @@ export default function PreferenceTable({
                             </div>
                             <div className="flex flex-col gap-1 pl-1">
                               <div>
-                                <strong className="text-amber-900">Option 1 (Clean Master CSV):</strong> Manually delete these {matcherStats.unmatched} row{matcherStats.unmatched > 1 ? "s" : ""} from your master CSV/spreadsheet so that all rows align perfectly without blank index gaps.
+                                <strong className="text-amber-900">Option 1 (Clean Master CSV):</strong> Delete these {matcherStats.unmatched} row{matcherStats.unmatched > 1 ? "s" : ""} (which will sort to positions #{matcherStats.targetCount + 1}+ at the end) from your master spreadsheet if you no longer need them.
                               </div>
                               <div>
                                 <strong className="text-amber-900">Option 2 (Restore to Target):</strong> {useAppTableForA ? (

@@ -10,6 +10,62 @@ function normalizeString(str: string): string {
     .trim();
 }
 
+function parseRowItem(line: string): { institution: string; branch: string; primaryKey: string; altKey: string } {
+  const trimmed = line.trim();
+  if (!trimmed) return { institution: "", branch: "", primaryKey: "", altKey: "" };
+
+  let fields: string[] = [];
+
+  if (line.includes("\t")) {
+    fields = line.split("\t").map(s => s.trim());
+  } else if (line.includes(",")) {
+    const regex = /(?:^|,)(?:"([^"]*)"|([^,]*))/g;
+    let match;
+    while ((match = regex.exec(line)) !== null) {
+      if (match[0] === "" && match.index === regex.lastIndex) {
+        regex.lastIndex++;
+      }
+      const val = (match[1] !== undefined ? match[1] : match[2]) || "";
+      fields.push(val.trim());
+    }
+  } else {
+    fields = line.split(/\s{2,}/).map(s => s.trim());
+  }
+
+  fields = fields.filter(f => f.length > 0);
+
+  let inst = "";
+  let br = "";
+
+  if (fields.length >= 3) {
+    if (/^\d+$/.test(fields[0])) {
+      inst = fields[1];
+      br = fields[2];
+    } else {
+      inst = fields[0];
+      br = fields[1];
+    }
+  } else if (fields.length === 2) {
+    if (/^\d+$/.test(fields[0])) {
+      inst = fields[1];
+    } else {
+      inst = fields[0];
+      br = fields[1];
+    }
+  } else if (fields.length === 1) {
+    const cleanLine = fields[0].replace(/^\d+[\.\s\-]+/, "").trim();
+    inst = cleanLine;
+  }
+
+  const normInst = normalizeString(inst);
+  const normBr = normalizeString(br);
+  const normFull = normalizeString(trimmed.replace(/^\d+[\.\s\-]+/, ""));
+
+  const primaryKey = normBr ? `${normInst}___${normBr}` : normInst;
+
+  return { institution: inst, branch: br, primaryKey, altKey: normFull };
+}
+
 interface PreferenceTableProps {
   preferences: PreferenceItem[];
   onMoveUp: (index: number) => void;
@@ -23,6 +79,8 @@ interface PreferenceTableProps {
     updatedBranch: string
   ) => { success: boolean; duplicateIndex?: number };
   onResetOriginalOrder?: () => void;
+  showOCTModal?: boolean;
+  setShowOCTModal?: (show: boolean) => void;
 }
 
 export default function PreferenceTable({
@@ -34,10 +92,26 @@ export default function PreferenceTable({
   onUploadCSV,
   onEdit,
   onResetOriginalOrder,
+  showOCTModal,
+  setShowOCTModal,
 }: PreferenceTableProps) {
   // Store target position inputs for each row
   const [jumpInputs, setJumpInputs] = useState<{ [key: string]: string }>({});
   const [dragActive, setDragActive] = useState(false);
+  const [localOCTModal, setLocalOCTModal] = useState(false);
+
+  const isOCTOpen = showOCTModal !== undefined ? showOCTModal : localOCTModal;
+
+  const closeOCTModal = () => {
+    setLocalOCTModal(false);
+    if (setShowOCTModal) setShowOCTModal(false);
+  };
+
+  const openOCTModal = () => {
+    setLocalOCTModal(true);
+    if (setShowOCTModal) setShowOCTModal(true);
+    setUseAppTableForA(true);
+  };
 
   const handleCopyOriginalOrders = () => {
     if (preferences.length === 0) {
@@ -72,7 +146,8 @@ export default function PreferenceTable({
   const [pastedText, setPastedText] = useState("");
   const [pastedPreview, setPastedPreview] = useState<{ institution: string; branch: string }[]>([]);
 
-  // List Matcher States
+  // Order Corrector Tool States
+  const [useAppTableForA, setUseAppTableForA] = useState(true);
   const [matcherListB, setMatcherListB] = useState("");
   const [matcherListA, setMatcherListA] = useState("");
   const [matcherOutput, setMatcherOutput] = useState("");
@@ -81,59 +156,128 @@ export default function PreferenceTable({
     unmatched: number;
     total: number;
     unmatchedItems: string[];
+    targetMissingItems: string[];
   } | null>(null);
 
+  const handleUploadListBFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const text = event.target?.result as string;
+      if (text) {
+        setMatcherListB(text);
+        setMatcherStats(null);
+        setMatcherOutput("");
+      }
+    };
+    reader.readAsText(file);
+  };
+
   const handleRunListMatcher = () => {
-    if (!matcherListB.trim() || !matcherListA.trim()) {
-      alert("Please paste text into both List B and List A textareas.");
+    if (!matcherListB.trim()) {
+      alert("Please upload or paste your master spreadsheet rows (List B).");
       return;
     }
 
-    const linesB = matcherListB.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
-    const linesA = matcherListA.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+    if (!useAppTableForA && !matcherListA.trim()) {
+      alert("Please paste target list text into List A.");
+      return;
+    }
 
-    const normA = linesA.map(line => normalizeString(line));
-    const normB = linesB.map(line => normalizeString(line));
-
-    // Map of normalized string -> array of indices in List A
+    // Map of normalized key -> array of 0-based indices in Target List A
     const aIndicesMap: { [key: string]: number[] } = {};
-    normA.forEach((aItem, index) => {
-      if (!aItem) return;
-      if (!aIndicesMap[aItem]) {
-        aIndicesMap[aItem] = [];
+
+    const addTargetItem = (primaryKey: string, altKey: string, idx: number) => {
+      if (primaryKey) {
+        if (!aIndicesMap[primaryKey]) aIndicesMap[primaryKey] = [];
+        aIndicesMap[primaryKey].push(idx);
       }
-      aIndicesMap[aItem].push(index);
-    });
+      if (altKey && altKey !== primaryKey) {
+        if (!aIndicesMap[altKey]) aIndicesMap[altKey] = [];
+        aIndicesMap[altKey].push(idx);
+      }
+    };
+
+    if (useAppTableForA) {
+      if (preferences.length === 0) {
+        alert("Your active applet preference table is empty. Add items to your table or switch to 'Paste Custom Target List A'.");
+        return;
+      }
+      preferences.forEach((pref, idx) => {
+        const normInst = normalizeString(pref.institution);
+        const normBr = normalizeString(pref.branch);
+        const primaryKey = normBr ? `${normInst}___${normBr}` : normInst;
+        const altKey = normalizeString(`${pref.institution} ${pref.branch}`);
+        addTargetItem(primaryKey, altKey, idx);
+      });
+    } else {
+      const linesA = matcherListA.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+      linesA.forEach((line, idx) => {
+        const parsed = parseRowItem(line);
+        addTargetItem(parsed.primaryKey, parsed.altKey, idx);
+      });
+    }
+
+    // Process List B lines
+    const linesB = matcherListB.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
 
     const reorderPositions: (number | string)[] = [];
     let matchedCount = 0;
     let unmatchedCount = 0;
     const unmatchedItems: string[] = [];
+    const matchedAIndices = new Set<number>();
 
-    // Next match pointers for each normalized key to handle duplicates sequentially
     const currentKeyPointer: { [key: string]: number } = {};
 
-    normB.forEach((bItem, bIndex) => {
-      const indices = aIndicesMap[bItem];
+    linesB.forEach((bLine) => {
+      const parsedB = parseRowItem(bLine);
+
+      // Try primary key first, then altKey
+      let indices = aIndicesMap[parsedB.primaryKey];
+      let matchedKey = parsedB.primaryKey;
+
+      if (!indices || indices.length === 0) {
+        indices = aIndicesMap[parsedB.altKey];
+        matchedKey = parsedB.altKey;
+      }
+
       if (indices && indices.length > 0) {
-        const ptr = currentKeyPointer[bItem] || 0;
+        const ptr = currentKeyPointer[matchedKey] || 0;
         if (ptr < indices.length) {
           const aIndex = indices[ptr];
           reorderPositions.push(aIndex + 1);
-          currentKeyPointer[bItem] = ptr + 1;
+          currentKeyPointer[matchedKey] = ptr + 1;
           matchedCount++;
+          matchedAIndices.add(aIndex);
         } else {
-          // Extra duplicates in B that are not present in A
           reorderPositions.push("");
           unmatchedCount++;
-          unmatchedItems.push(linesB[bIndex]);
+          unmatchedItems.push(bLine);
         }
       } else {
         reorderPositions.push("");
         unmatchedCount++;
-        unmatchedItems.push(linesB[bIndex]);
+        unmatchedItems.push(bLine);
       }
     });
+
+    // Find target items that were missing in List B
+    const targetMissingItems: string[] = [];
+    if (useAppTableForA) {
+      preferences.forEach((pref, idx) => {
+        if (!matchedAIndices.has(idx)) {
+          targetMissingItems.push(`Choice #${idx + 1}: ${pref.institution} (${pref.branch})`);
+        }
+      });
+    } else {
+      const linesA = matcherListA.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+      linesA.forEach((line, idx) => {
+        if (!matchedAIndices.has(idx)) {
+          targetMissingItems.push(`Line #${idx + 1}: ${line}`);
+        }
+      });
+    }
 
     setMatcherOutput(reorderPositions.join("\n"));
     setMatcherStats({
@@ -141,6 +285,7 @@ export default function PreferenceTable({
       unmatched: unmatchedCount,
       total: linesB.length,
       unmatchedItems,
+      targetMissingItems,
     });
   };
 
@@ -393,12 +538,20 @@ export default function PreferenceTable({
               <button
                 type="button"
                 onClick={onResetOriginalOrder}
-                className="bg-[#ffc107] hover:bg-[#e0a800] active:bg-[#d39e00] text-gray-900 border-b border-amber-600 active:border-b-0 text-[9px] font-bold uppercase px-2 py-0.5 cursor-pointer transition-all ml-2 rounded-sm"
+                className="bg-[#ffc107] hover:bg-[#e0a800] active:bg-[#d39e00] text-gray-900 border-b border-amber-600 active:border-b-0 text-[9px] font-bold uppercase px-2 py-0.5 cursor-pointer transition-all ml-1 rounded-sm"
                 title="Reset all Original Numbers to match current priorities (1, 2, 3...)"
               >
                 🔄 Reset Orig No.
               </button>
             )}
+            <button
+              type="button"
+              onClick={openOCTModal}
+              className="bg-[#28a745] hover:bg-[#218838] active:bg-[#1e7e34] text-white border-b border-[#1e7e34] active:border-b-0 text-[9px] font-bold uppercase px-2 py-0.5 cursor-pointer transition-all ml-1 rounded-sm flex items-center gap-1 shadow-sm"
+              title="Align your master spreadsheet to match your active preference list order"
+            >
+              🛠️ Order Corrector Tool
+            </button>
           </div>
           <div className="text-xs text-amber-300 mt-1 sm:mt-0 font-mono">
             Total Choices Filled: <strong>{preferences.length}</strong>
@@ -451,7 +604,7 @@ export default function PreferenceTable({
                           : "text-gray-600 hover:bg-gray-200"
                       }`}
                     >
-                      ⚡ Method C: List Matcher
+                      🛠️ Order Corrector Tool
                     </button>
                   </div>
 
@@ -563,76 +716,117 @@ export default function PreferenceTable({
                       </div>
                     )}
 
-                    {/* Method C: List Matcher Tab */}
+                    {/* Order Corrector Tool Tab */}
                     {importTab === "matcher" && (
                       <div className="flex flex-col gap-4 text-left font-sans text-xs">
                         <div className="bg-slate-50 border border-slate-300 p-3 text-slate-700 leading-relaxed rounded-sm">
-                          <h4 className="font-bold uppercase text-[11px] text-[#002d5a] mb-1">
-                            ⚡ List Matcher (Spreadsheet Row Alignment Engine)
+                          <h4 className="font-bold uppercase text-[11px] text-[#002d5a] mb-1 flex items-center gap-1.5">
+                            🛠️ Order Corrector Tool (Spreadsheet Alignment Tool)
                           </h4>
                           <p className="text-[11px]">
-                            If you already have a master spreadsheet <strong>(List B)</strong> in its original sequence, and you have designed a target priority sequence <strong>(List A)</strong>, this tool aligns them.
+                            Reorder your master spreadsheet (with all columns) so that its rows match your target preference list sequence!
                           </p>
                           <p className="text-[11px] mt-1 font-semibold text-amber-800">
-                            How it works: We generate a reorder column of rank numbers. Paste it next to your master spreadsheet, sort ascending, and your entire sheet (with all other columns) reorders to match List A perfectly!
+                            How it works: Upload/paste your master spreadsheet rows below (supporting SNo, Institution Name, and Branch Name). We generate a calculated reorder column. Paste it next to your master spreadsheet, sort <strong>ASCENDING</strong>, and your entire sheet reorders perfectly!
                           </p>
                         </div>
 
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                          {/* List B (Current Spreadsheet Order) */}
-                          <div className="flex flex-col gap-1.5">
-                            <label className="font-bold text-gray-700 uppercase tracking-tight flex justify-between items-center text-[10px]">
-                              <span>1. Paste List B (Original Spreadsheet Rows)</span>
-                              <span className="text-gray-500 font-mono font-normal">
-                                {matcherListB.split(/\r?\n/).filter(Boolean).length} rows
-                              </span>
+                        {/* Step 1: Target List A Selection */}
+                        <div className="bg-white border border-gray-300 p-3 flex flex-col gap-2">
+                          <label className="font-bold text-gray-800 uppercase text-[11px] tracking-tight">
+                            1. Select Target List A (Desired Priority Sequence):
+                          </label>
+                          <div className="flex flex-col sm:flex-row gap-3 text-xs">
+                            <label className="flex items-center gap-2 cursor-pointer font-semibold text-slate-800 bg-slate-50 border border-slate-200 px-3 py-1.5 rounded hover:bg-slate-100">
+                              <input
+                                type="radio"
+                                name="targetSource"
+                                checked={useAppTableForA}
+                                onChange={() => {
+                                  setUseAppTableForA(true);
+                                  setMatcherStats(null);
+                                  setMatcherOutput("");
+                                }}
+                                className="accent-[#002d5a]"
+                              />
+                              <span>🎯 Use Active Preference Table ({preferences.length} items)</span>
                             </label>
-                            <p className="text-[10px] text-gray-500 leading-tight">
-                              One item per line (e.g. Institution or combined rows). This matches your untouched spreadsheet.
-                            </p>
-                            <textarea
-                              value={matcherListB}
-                              onChange={(e) => {
-                                setMatcherListB(e.target.value);
-                                setMatcherStats(null);
-                                setMatcherOutput("");
-                              }}
-                              placeholder="Example:&#10;Birla Institute - CS&#10;IIT Bombay - ME&#10;NIT Trichy - ECE"
-                              className="w-full h-36 border border-gray-400 p-2 font-mono text-[11px] bg-white text-gray-900 focus:outline-none focus:ring-1 focus:ring-blue-600 focus:border-blue-600"
-                            />
+                            <label className="flex items-center gap-2 cursor-pointer font-semibold text-slate-800 bg-slate-50 border border-slate-200 px-3 py-1.5 rounded hover:bg-slate-100">
+                              <input
+                                type="radio"
+                                name="targetSource"
+                                checked={!useAppTableForA}
+                                onChange={() => {
+                                  setUseAppTableForA(false);
+                                  setMatcherStats(null);
+                                  setMatcherOutput("");
+                                }}
+                                className="accent-[#002d5a]"
+                              />
+                              <span>📝 Paste Custom Target List A</span>
+                            </label>
                           </div>
 
-                          {/* List A (Target Priority Sequence) */}
-                          <div className="flex flex-col gap-1.5">
-                            <label className="font-bold text-gray-700 uppercase tracking-tight flex justify-between items-center text-[10px]">
-                              <span>2. Paste List A (Disordered / Target Order)</span>
-                              <span className="text-gray-500 font-mono font-normal">
-                                {matcherListA.split(/\r?\n/).filter(Boolean).length} rows
-                              </span>
+                          {!useAppTableForA && (
+                            <div className="mt-2 flex flex-col gap-1">
+                              <p className="text-[10px] text-gray-500 leading-tight">
+                                Paste target preference lines (one item per line or CSV rows with College & Branch).
+                              </p>
+                              <textarea
+                                value={matcherListA}
+                                onChange={(e) => {
+                                  setMatcherListA(e.target.value);
+                                  setMatcherStats(null);
+                                  setMatcherOutput("");
+                                }}
+                                placeholder="Example:&#10;1, IIIT Dharwad, Computer Science and Engineering (BTECH)&#10;2, IIIT Pune, Electronics and Communication Engineering&#10;3, Birla Institute of Technology Mesra, Mechanical Engineering"
+                                className="w-full h-28 border border-gray-400 p-2 font-mono text-[11px] bg-white text-gray-900 focus:outline-none focus:ring-1 focus:ring-blue-600"
+                              />
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Step 2: Master Spreadsheet (List B) Input */}
+                        <div className="bg-white border border-gray-300 p-3 flex flex-col gap-2">
+                          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+                            <label className="font-bold text-gray-800 uppercase text-[11px] tracking-tight">
+                              2. Upload or Paste Master Spreadsheet Rows (List B):
                             </label>
-                            <p className="text-[10px] text-gray-500 leading-tight">
-                              The target sequence you want B to transform into. We will locate B items here.
-                            </p>
-                            <textarea
-                              value={matcherListA}
-                              onChange={(e) => {
-                                setMatcherListA(e.target.value);
-                                setMatcherStats(null);
-                                setMatcherOutput("");
-                              }}
-                              placeholder="Example:&#10;IIT Bombay - ME&#10;NIT Trichy - ECE&#10;Birla Institute - CS"
-                              className="w-full h-36 border border-gray-400 p-2 font-mono text-[11px] bg-white text-gray-900 focus:outline-none focus:ring-1 focus:ring-blue-600 focus:border-blue-600"
-                            />
+                            <div className="flex flex-col items-end">
+                              <label className="bg-[#002d5a] hover:bg-slate-800 text-white font-bold text-[10px] uppercase px-2.5 py-1 rounded cursor-pointer transition-colors flex items-center gap-1">
+                                📁 Upload indexed CSV File
+                                <input
+                                  type="file"
+                                  accept=".csv,.txt"
+                                  onChange={handleUploadListBFile}
+                                  className="hidden"
+                                />
+                              </label>
+                              <span className="text-[9px] text-gray-500 font-medium italic mt-0.5">having an index column apart from data</span>
+                            </div>
                           </div>
+                          <p className="text-[10px] text-gray-500 leading-tight">
+                            Supports 3-column rows (SNo, College/Institution, Branch/Program), 2-column rows, or tab-separated spreadsheet lines.
+                          </p>
+                          <textarea
+                            value={matcherListB}
+                            onChange={(e) => {
+                              setMatcherListB(e.target.value);
+                              setMatcherStats(null);
+                              setMatcherOutput("");
+                            }}
+                            placeholder="Example (from spreadsheet / CSV):&#10;1   IIIT Dharwad   Computer Science and Engineering (BTECH)&#10;2   IIIT Pune   Electronics and Communication Engineering&#10;22  Birla Institute of Technology, Mesra, Ranchi   Civil Engineering (BTECH)"
+                            className="w-full h-36 border border-gray-400 p-2 font-mono text-[11px] bg-white text-gray-900 focus:outline-none focus:ring-1 focus:ring-blue-600"
+                          />
                         </div>
 
                         <div className="flex justify-center mt-1">
                           <button
                             type="button"
                             onClick={handleRunListMatcher}
-                            className="bg-[#002d5a] hover:bg-slate-800 text-white font-bold uppercase tracking-wider px-5 py-2 text-xs border-b-2 border-slate-900 hover:border-b-0 active:translate-y-0.5 cursor-pointer transition-all flex items-center gap-1.5 shadow-sm"
+                            className="bg-[#002d5a] hover:bg-slate-800 text-white font-bold uppercase tracking-wider px-6 py-2.5 text-xs border-b-2 border-slate-900 hover:border-b-0 active:translate-y-0.5 cursor-pointer transition-all flex items-center gap-1.5 shadow-sm"
                           >
-                            ⚡ Align and Generate Reorder Column
+                            ⚡ Calculate Reorder Index Numbers
                           </button>
                         </div>
 
@@ -651,26 +845,86 @@ export default function PreferenceTable({
                               <div className="md:col-span-3 flex flex-col gap-2">
                                 <div className="text-[11px] leading-relaxed text-gray-700">
                                   <p className="font-bold text-[#002d5a] mb-1">✅ Alignment Complete!</p>
-                                  <p>We mapped each item in List B to its priority rank in List A.</p>
+                                  <p>We calculated the target position rank for each row in your master spreadsheet.</p>
                                   <p className="mt-1">
-                                    Click <strong>Copy Reorder Column</strong>, paste it directly next to List B in your spreadsheet (ensuring the count matches), and sort ascending.
+                                    Click <strong>Copy Reorder Column</strong>, paste it directly next to your master spreadsheet, select all columns, and sort <strong>ASCENDING</strong> by this new column!
                                   </p>
                                 </div>
 
                                 {matcherStats.unmatched > 0 && (
-                                  <div className="border border-red-200 bg-red-50 text-red-800 p-2 text-[11px]">
-                                    <div className="font-bold uppercase text-[10px] mb-1">
-                                      ⚠️ Warning: {matcherStats.unmatched} items unmatched
+                                  <div className="border border-amber-300 bg-amber-50/90 text-amber-950 p-2.5 text-[11px] rounded flex flex-col gap-2">
+                                    <div className="font-bold uppercase text-[11px] text-amber-900 flex items-center justify-between border-b border-amber-200 pb-1">
+                                      <span>⚠️ Warning: {matcherStats.unmatched} Item{matcherStats.unmatched > 1 ? "s" : ""} Missing from Target</span>
+                                      <span className="text-[10px] bg-amber-200 text-amber-900 font-mono px-1.5 py-0.5 rounded">Blank Index Assigned</span>
                                     </div>
-                                    <p className="leading-tight text-[10px] mb-2 text-red-700">
-                                      The following items in your master sheet were not found in your target list. They will show as empty cells to keep the row length aligned.
+
+                                    <p className="leading-snug text-[10.5px] text-amber-900">
+                                      The following item{matcherStats.unmatched > 1 ? "s" : ""} in your uploaded indexed CSV were not found in your target preference list (likely deleted from your target). They have been assigned <strong>blank serial numbers</strong> so all remaining matching rows reorder accurately.
                                     </p>
-                                    <div className="max-h-20 overflow-y-auto font-mono text-[10px] bg-white border border-red-150 p-1 divide-y divide-gray-100 text-slate-800">
+
+                                    <div className="max-h-24 overflow-y-auto font-mono text-[10px] bg-white border border-amber-200 p-1 divide-y divide-amber-100 text-slate-800 rounded-sm">
                                       {matcherStats.unmatchedItems.map((item, idx) => (
-                                        <div key={idx} className="py-0.5 px-1">
-                                          {item}
+                                        <div key={idx} className="py-0.5 px-1 truncate">
+                                          • {item}
                                         </div>
                                       ))}
+                                    </div>
+
+                                    <div className="bg-amber-100/80 border border-amber-300 p-2 rounded text-[10.5px] text-amber-950 flex flex-col gap-1">
+                                      <div className="font-bold text-amber-900 uppercase text-[10px] tracking-wide flex items-center gap-1">
+                                        💡 Actionable Steps Options:
+                                      </div>
+                                      <div className="flex flex-col gap-1 pl-1">
+                                        <div>
+                                          <strong className="text-amber-900">Option 1 (Clean Master CSV):</strong> Manually delete these {matcherStats.unmatched} row{matcherStats.unmatched > 1 ? "s" : ""} from your master CSV/spreadsheet so that all rows align perfectly without blank index gaps.
+                                        </div>
+                                        <div>
+                                          <strong className="text-amber-900">Option 2 (Restore to Target):</strong> {useAppTableForA ? (
+                                            <>Add these missing choice(s) back into your <strong>Active Preference Table</strong> in the app, then click '⚡ Calculate Reorder Index Numbers' again.</>
+                                          ) : (
+                                            <>Add these missing choice(s) into your <strong>Custom Target List A</strong>, then click '⚡ Calculate Reorder Index Numbers' again.</>
+                                          )}
+                                        </div>
+                                      </div>
+                                    </div>
+                                  </div>
+                                )}
+
+                                {matcherStats.targetMissingItems && matcherStats.targetMissingItems.length > 0 && (
+                                  <div className="border border-red-300 bg-red-50/90 text-red-950 p-2.5 text-[11px] rounded flex flex-col gap-2">
+                                    <div className="font-bold uppercase text-[11px] text-red-900 flex items-center justify-between border-b border-red-200 pb-1">
+                                      <span>⚠️ Warning: {matcherStats.targetMissingItems.length} Target Choice{matcherStats.targetMissingItems.length > 1 ? "s" : ""} Missing from Uploaded CSV</span>
+                                      <span className="text-[10px] bg-red-200 text-red-900 font-mono px-1.5 py-0.5 rounded">Not Found in CSV</span>
+                                    </div>
+
+                                    <p className="leading-snug text-[10.5px] text-red-900">
+                                      Your target preference list contains {matcherStats.targetMissingItems.length} choice{matcherStats.targetMissingItems.length > 1 ? "s" : ""} that do not exist in your uploaded indexed CSV.
+                                    </p>
+
+                                    <div className="max-h-24 overflow-y-auto font-mono text-[10px] bg-white border border-red-200 p-1 divide-y divide-red-100 text-slate-800 rounded-sm">
+                                      {matcherStats.targetMissingItems.map((item, idx) => (
+                                        <div key={idx} className="py-0.5 px-1 truncate">
+                                          • {item}
+                                        </div>
+                                      ))}
+                                    </div>
+
+                                    <div className="bg-red-100/80 border border-red-300 p-2 rounded text-[10.5px] text-red-950 flex flex-col gap-1">
+                                      <div className="font-bold text-red-900 uppercase text-[10px] tracking-wide flex items-center gap-1">
+                                        💡 Actionable Steps Options:
+                                      </div>
+                                      <div className="flex flex-col gap-1 pl-1">
+                                        <div>
+                                          <strong className="text-red-900">Option 1 (Add Rows to Master CSV):</strong> Manually add these {matcherStats.targetMissingItems.length} missing row{matcherStats.targetMissingItems.length > 1 ? "s" : ""} into your master CSV/spreadsheet so that all choices can be indexed and reordered.
+                                        </div>
+                                        <div>
+                                          <strong className="text-red-900">Option 2 (Remove from Target):</strong> {useAppTableForA ? (
+                                            <>Delete or remove these choice(s) from your <strong>Active Preference Table</strong> in the app, then click '⚡ Calculate Reorder Index Numbers' again.</>
+                                          ) : (
+                                            <>Remove these line(s) from your <strong>Custom Target List A</strong>, then click '⚡ Calculate Reorder Index Numbers' again.</>
+                                          )}
+                                        </div>
+                                      </div>
                                     </div>
                                   </div>
                                 )}
@@ -934,6 +1188,284 @@ export default function PreferenceTable({
         <div className="mt-2 text-[10px] text-slate-500 font-mono flex flex-col sm:flex-row sm:justify-between sm:items-center px-1">
           <div>* Use UP / DOWN buttons, or enter a number in Jump Box to alter preference ordering directly.</div>
           <div className="mt-1 sm:mt-0 font-bold text-slate-600 uppercase">PREFERENCE LIST CURRENTLY UNLOCKED (DRAFT SAVED TO BROWSER STORAGE)</div>
+        </div>
+      )}
+
+      {/* Modal Overlay for Order Corrector Tool (OCT) */}
+      {isOCTOpen && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-3 sm:p-5 overflow-y-auto" id="oct-modal-overlay">
+          <div className="bg-white border-2 border-[#002d5a] max-w-4xl w-full shadow-2xl rounded-sm my-auto overflow-hidden animate-in fade-in zoom-in-95 duration-200 text-left font-sans text-xs">
+            {/* Modal Header */}
+            <div className="bg-[#002d5a] text-white px-4 py-3 flex items-center justify-between border-b border-slate-700">
+              <div className="flex items-center gap-2">
+                <span className="text-base">🛠️</span>
+                <h3 className="font-bold text-sm uppercase tracking-wide">
+                  Order Corrector Tool (Spreadsheet Alignment Tool)
+                </h3>
+              </div>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-4 sm:p-6 flex flex-col gap-4 max-h-[80vh] overflow-y-auto">
+              <div className="bg-slate-50 border border-slate-300 p-3 text-slate-700 leading-relaxed rounded-sm">
+                <p className="text-[12px] font-semibold text-[#002d5a] mb-1">
+                  Reorder your master spreadsheet (with all columns) so that its rows match your target preference list sequence!
+                </p>
+                <p className="text-[11px] text-gray-600 leading-normal">
+                  <strong>How it works:</strong> Upload or paste your master spreadsheet rows below (supporting SNo, College/Institution, and Branch/Program). We calculate the target position number for each row. Paste the generated numbers column back next to your master spreadsheet, sort <strong>ASCENDING</strong> by that column, and your full master spreadsheet reorders instantly!
+                </p>
+              </div>
+
+              {/* Step 1: Target List A Selection */}
+              <div className="bg-white border border-gray-300 p-3.5 flex flex-col gap-2 rounded-sm">
+                <label className="font-bold text-gray-800 uppercase text-[11px] tracking-tight flex items-center justify-between">
+                  <span>1. Select Target List A (Desired Priority Sequence):</span>
+                  <span className="text-blue-800 font-mono font-bold text-[10px] bg-blue-50 px-2 py-0.5 border border-blue-200">
+                    {useAppTableForA ? `${preferences.length} preferences active` : `${matcherListA.split(/\r?\n/).filter(Boolean).length} lines entered`}
+                  </span>
+                </label>
+                <div className="flex flex-col sm:flex-row gap-3 text-xs my-1">
+                  <label className={`flex items-center gap-2 cursor-pointer font-bold px-3 py-2 rounded border transition-all ${
+                    useAppTableForA ? "bg-blue-50 border-blue-600 text-[#002d5a]" : "bg-slate-50 border-slate-300 text-slate-700"
+                  }`}>
+                    <input
+                      type="radio"
+                      name="modalTargetSource"
+                      checked={useAppTableForA}
+                      onChange={() => {
+                        setUseAppTableForA(true);
+                        setMatcherStats(null);
+                        setMatcherOutput("");
+                      }}
+                      className="accent-[#002d5a]"
+                    />
+                    <span>🎯 Use Active Preference Table ({preferences.length} choices filled)</span>
+                  </label>
+                  <label className={`flex items-center gap-2 cursor-pointer font-bold px-3 py-2 rounded border transition-all ${
+                    !useAppTableForA ? "bg-blue-50 border-blue-600 text-[#002d5a]" : "bg-slate-50 border-slate-300 text-slate-700"
+                  }`}>
+                    <input
+                      type="radio"
+                      name="modalTargetSource"
+                      checked={!useAppTableForA}
+                      onChange={() => {
+                        setUseAppTableForA(false);
+                        setMatcherStats(null);
+                        setMatcherOutput("");
+                      }}
+                      className="accent-[#002d5a]"
+                    />
+                    <span>📝 Paste Custom Target List A</span>
+                  </label>
+                </div>
+
+                {useAppTableForA && preferences.length > 0 && (
+                  <div className="mt-1 bg-slate-50 border border-slate-200 p-2.5 max-h-28 overflow-y-auto font-mono text-[11px] text-slate-700 divide-y divide-gray-200">
+                    {preferences.map((p, idx) => (
+                      <div key={p.id} className="py-1 flex items-start gap-2">
+                        <span className="font-bold text-[#002d5a] w-6 shrink-0">{idx + 1}.</span>
+                        <span className="truncate">{p.institution} <span className="text-gray-500 font-sans">({p.branch})</span></span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {!useAppTableForA && (
+                  <div className="mt-1 flex flex-col gap-1">
+                    <p className="text-[10px] text-gray-500 leading-tight">
+                      Paste target preference lines (one item per line or CSV rows with College & Branch).
+                    </p>
+                    <textarea
+                      value={matcherListA}
+                      onChange={(e) => {
+                        setMatcherListA(e.target.value);
+                        setMatcherStats(null);
+                        setMatcherOutput("");
+                      }}
+                      placeholder="Example:&#10;1, IIIT Dharwad, Computer Science and Engineering (BTECH)&#10;2, IIIT Pune, Electronics and Communication Engineering&#10;3, Birla Institute of Technology Mesra, Mechanical Engineering"
+                      className="w-full h-28 border border-gray-400 p-2 font-mono text-[11px] bg-white text-gray-900 focus:outline-none focus:ring-1 focus:ring-blue-600"
+                    />
+                  </div>
+                )}
+              </div>
+
+              {/* Step 2: Master Spreadsheet (List B) Input */}
+              <div className="bg-white border border-gray-300 p-3.5 flex flex-col gap-2 rounded-sm">
+                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+                  <label className="font-bold text-gray-800 uppercase text-[11px] tracking-tight">
+                    2. Upload or Paste Master Spreadsheet Rows (List B):
+                  </label>
+                  <div className="flex flex-col items-end">
+                    <label className="bg-[#002d5a] hover:bg-slate-800 text-white font-bold text-[10px] uppercase px-3 py-1 rounded cursor-pointer transition-colors flex items-center gap-1 shadow-sm">
+                      📁 Upload indexed CSV File
+                      <input
+                        type="file"
+                        accept=".csv,.txt"
+                        onChange={handleUploadListBFile}
+                        className="hidden"
+                      />
+                    </label>
+                    <span className="text-[9px] text-gray-500 font-medium italic mt-0.5">having an index column apart from data</span>
+                  </div>
+                </div>
+                <p className="text-[10px] text-gray-500 leading-tight">
+                  Supports 3-column spreadsheet rows (SNo, College/Institution, Branch/Program), 2-column rows, or tab-separated spreadsheet lines.
+                </p>
+                <textarea
+                  value={matcherListB}
+                  onChange={(e) => {
+                    setMatcherListB(e.target.value);
+                    setMatcherStats(null);
+                    setMatcherOutput("");
+                  }}
+                  placeholder="Example (from spreadsheet / CSV):&#10;1   IIIT Dharwad   Computer Science and Engineering (BTECH)&#10;2   IIIT Pune   Electronics and Communication Engineering&#10;22  Birla Institute of Technology, Mesra, Ranchi   Civil Engineering (BTECH)"
+                  className="w-full h-36 border border-gray-400 p-2 font-mono text-[11px] bg-white text-gray-900 focus:outline-none focus:ring-1 focus:ring-blue-600"
+                />
+              </div>
+
+              <div className="flex justify-center my-1">
+                <button
+                  type="button"
+                  onClick={handleRunListMatcher}
+                  className="bg-[#002d5a] hover:bg-slate-800 active:bg-slate-900 text-white font-bold uppercase tracking-wider px-6 py-2.5 text-xs border-b-2 border-slate-900 active:border-b-0 active:translate-y-0.5 cursor-pointer transition-all flex items-center gap-1.5 shadow"
+                >
+                  ⚡ Calculate Reorder Index Numbers
+                </button>
+              </div>
+
+              {/* Match Results Output */}
+              {matcherStats && (
+                <div className="border border-gray-300 bg-slate-50 p-4 flex flex-col gap-3 rounded-sm">
+                  <h5 className="font-bold uppercase text-[11px] text-gray-800 border-b border-gray-200 pb-1.5 flex items-center justify-between">
+                    <span>📊 Alignment Results Stats</span>
+                    <span className="font-mono text-xs">
+                      Matched: <strong className="text-green-700">{matcherStats.matched}</strong> / {matcherStats.total}
+                    </span>
+                  </h5>
+
+                  <div className="grid grid-cols-1 md:grid-cols-5 gap-3.5">
+                    {/* Left instructions */}
+                    <div className="md:col-span-3 flex flex-col gap-2">
+                      <div className="text-[11px] leading-relaxed text-gray-700 bg-white border border-gray-200 p-2.5">
+                        <p className="font-bold text-[#002d5a] mb-1">✅ Calculation Complete!</p>
+                        <p>We mapped each row in your master spreadsheet to its target preference position.</p>
+                        <p className="mt-1 font-semibold text-amber-800">
+                          Click <strong>Copy Reorder Column</strong>, paste it directly next to your master spreadsheet, select all columns, and sort <strong>ASCENDING</strong> by this new column!
+                        </p>
+                      </div>
+
+                      {matcherStats.unmatched > 0 && (
+                        <div className="border border-amber-300 bg-amber-50/90 text-amber-950 p-2.5 text-[11px] rounded flex flex-col gap-2">
+                          <div className="font-bold uppercase text-[11px] text-amber-900 flex items-center justify-between border-b border-amber-200 pb-1">
+                            <span>⚠️ Warning: {matcherStats.unmatched} Item{matcherStats.unmatched > 1 ? "s" : ""} Missing from Target</span>
+                            <span className="text-[10px] bg-amber-200 text-amber-900 font-mono px-1.5 py-0.5 rounded">Blank Index Assigned</span>
+                          </div>
+
+                          <p className="leading-snug text-[10.5px] text-amber-900">
+                            The following item{matcherStats.unmatched > 1 ? "s" : ""} in your uploaded indexed CSV were not found in your target preference list (likely deleted from your target). They have been assigned <strong>blank serial numbers</strong> so all remaining matching rows reorder accurately.
+                          </p>
+
+                          <div className="max-h-24 overflow-y-auto font-mono text-[10px] bg-white border border-amber-200 p-1 divide-y divide-amber-100 text-slate-800 rounded-sm">
+                            {matcherStats.unmatchedItems.map((item, idx) => (
+                              <div key={idx} className="py-0.5 px-1 truncate">
+                                • {item}
+                              </div>
+                            ))}
+                          </div>
+
+                          <div className="bg-amber-100/80 border border-amber-300 p-2 rounded text-[10.5px] text-amber-950 flex flex-col gap-1">
+                            <div className="font-bold text-amber-900 uppercase text-[10px] tracking-wide flex items-center gap-1">
+                              💡 Actionable Steps Options:
+                            </div>
+                            <div className="flex flex-col gap-1 pl-1">
+                              <div>
+                                <strong className="text-amber-900">Option 1 (Clean Master CSV):</strong> Manually delete these {matcherStats.unmatched} row{matcherStats.unmatched > 1 ? "s" : ""} from your master CSV/spreadsheet so that all rows align perfectly without blank index gaps.
+                              </div>
+                              <div>
+                                <strong className="text-amber-900">Option 2 (Restore to Target):</strong> {useAppTableForA ? (
+                                  <>Add these missing choice(s) back into your <strong>Active Preference Table</strong> in the app, then click '⚡ Calculate Reorder Index Numbers' again.</>
+                                ) : (
+                                  <>Add these missing choice(s) into your <strong>Custom Target List A</strong>, then click '⚡ Calculate Reorder Index Numbers' again.</>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {matcherStats.targetMissingItems && matcherStats.targetMissingItems.length > 0 && (
+                        <div className="border border-red-300 bg-red-50/90 text-red-950 p-2.5 text-[11px] rounded flex flex-col gap-2">
+                          <div className="font-bold uppercase text-[11px] text-red-900 flex items-center justify-between border-b border-red-200 pb-1">
+                            <span>⚠️ Warning: {matcherStats.targetMissingItems.length} Target Choice{matcherStats.targetMissingItems.length > 1 ? "s" : ""} Missing from Uploaded CSV</span>
+                            <span className="text-[10px] bg-red-200 text-red-900 font-mono px-1.5 py-0.5 rounded">Not Found in CSV</span>
+                          </div>
+
+                          <p className="leading-snug text-[10.5px] text-red-900">
+                            Your target preference list contains {matcherStats.targetMissingItems.length} choice{matcherStats.targetMissingItems.length > 1 ? "s" : ""} that do not exist in your uploaded indexed CSV.
+                          </p>
+
+                          <div className="max-h-24 overflow-y-auto font-mono text-[10px] bg-white border border-red-200 p-1 divide-y divide-red-100 text-slate-800 rounded-sm">
+                            {matcherStats.targetMissingItems.map((item, idx) => (
+                              <div key={idx} className="py-0.5 px-1 truncate">
+                                • {item}
+                              </div>
+                            ))}
+                          </div>
+
+                          <div className="bg-red-100/80 border border-red-300 p-2 rounded text-[10.5px] text-red-950 flex flex-col gap-1">
+                            <div className="font-bold text-red-900 uppercase text-[10px] tracking-wide flex items-center gap-1">
+                              💡 Actionable Steps Options:
+                            </div>
+                            <div className="flex flex-col gap-1 pl-1">
+                              <div>
+                                <strong className="text-red-900">Option 1 (Add Rows to Master CSV):</strong> Manually add these {matcherStats.targetMissingItems.length} missing row{matcherStats.targetMissingItems.length > 1 ? "s" : ""} into your master CSV/spreadsheet so that all choices can be indexed and reordered.
+                              </div>
+                              <div>
+                                <strong className="text-red-900">Option 2 (Remove from Target):</strong> {useAppTableForA ? (
+                                  <>Delete or remove these choice(s) from your <strong>Active Preference Table</strong> in the app, then click '⚡ Calculate Reorder Index Numbers' again.</>
+                                ) : (
+                                  <>Remove these line(s) from your <strong>Custom Target List A</strong>, then click '⚡ Calculate Reorder Index Numbers' again.</>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Right Output Textarea and Copy */}
+                    <div className="md:col-span-2 flex flex-col gap-2">
+                      <button
+                        type="button"
+                        onClick={handleCopyMatcherOutput}
+                        className="w-full bg-[#28a745] hover:bg-[#218838] active:bg-[#1e7e34] text-white py-2 text-xs font-bold uppercase tracking-wider shadow-sm cursor-pointer transition-colors"
+                      >
+                        📋 Copy Reorder Column
+                      </button>
+                      <textarea
+                        readOnly
+                        value={matcherOutput}
+                        className="w-full h-32 border border-gray-300 p-2 font-mono text-center text-xs bg-white text-gray-800 select-all focus:outline-none"
+                        title="Click and press Ctrl+A to select all"
+                        placeholder="Generated Column"
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="bg-gray-100 border-t border-gray-300 px-4 py-3 flex justify-end">
+              <button
+                type="button"
+                onClick={closeOCTModal}
+                className="bg-[#002d5a] hover:bg-slate-800 text-white px-5 py-1.5 text-xs font-bold uppercase tracking-wider cursor-pointer font-sans transition-all"
+              >
+                Close
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

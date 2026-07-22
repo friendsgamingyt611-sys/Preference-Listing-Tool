@@ -10,6 +10,7 @@ const LOCAL_STORAGE_TIME_KEY = "preference_list_saved_time";
 export default function App() {
   const [preferences, setPreferences] = useState<PreferenceItem[]>([]);
   const [lastSavedTime, setLastSavedTime] = useState<string>("");
+  const [showOCTModal, setShowOCTModal] = useState<boolean>(false);
 
   // Load from local storage on mount
   useEffect(() => {
@@ -305,6 +306,7 @@ export default function App() {
         onDownloadCSV={handleDownloadCSV}
         onCopyCSV={handleCopyCSV}
         onClearAll={handleClearAll}
+        onOpenOCT={() => setShowOCTModal(true)}
       />
 
       {/* Main Choice filling Area */}
@@ -325,6 +327,8 @@ export default function App() {
           onUploadCSV={handleUploadCSV}
           onEdit={handleEditPreference}
           onResetOriginalOrder={handleResetOriginalOrder}
+          showOCTModal={showOCTModal}
+          setShowOCTModal={setShowOCTModal}
         />
       </main>
 

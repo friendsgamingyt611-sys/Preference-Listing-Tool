@@ -5,9 +5,10 @@ interface HeaderProps {
   onDownloadCSV: () => void;
   onCopyCSV: () => void;
   onClearAll: () => void;
+  onOpenOCT?: () => void;
 }
 
-export default function Header({ totalCount, onDownloadCSV, onCopyCSV, onClearAll }: HeaderProps) {
+export default function Header({ totalCount, onDownloadCSV, onCopyCSV, onClearAll, onOpenOCT }: HeaderProps) {
   return (
     <header className="w-full flex flex-col" id="portal-header">
       {/* Under-header state & actions bar */}

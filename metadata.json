@@ -1,0 +1,6 @@
+{
+  "name": "Preference Listing Tool",
+  "description": "A pure utility tool for building, sorting, and exporting an ordered preference list of Institution and Branch pairs, modeled after JoSAA/CSAB counselling portals.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

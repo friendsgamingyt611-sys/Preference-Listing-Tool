@@ -14,6 +14,7 @@ export default function App() {
 
   // Load from local storage on mount
   useEffect(() => {
+    document.title = "Preference Listing Tool";
     const saved = localStorage.getItem(LOCAL_STORAGE_KEY);
     if (saved) {
       try {

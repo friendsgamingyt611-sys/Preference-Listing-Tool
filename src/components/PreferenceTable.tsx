@@ -189,6 +189,7 @@ export default function PreferenceTable({
     unmatched: number;
     total: number;
     targetCount: number;
+    isIdentical: boolean;
     unmatchedItems: string[];
     targetMissingItems: string[];
   } | null>(null);
@@ -376,12 +377,20 @@ export default function PreferenceTable({
       }
     });
 
+    const isIdentical =
+      linesB.length > 0 &&
+      linesB.length === targetCount &&
+      unmatchedCount === 0 &&
+      targetMissingItems.length === 0 &&
+      reorderPositions.every((pos, idx) => Number(pos) === idx + 1);
+
     setMatcherOutput(reorderPositions.join("\n"));
     setMatcherStats({
       matched: matchedCount,
       unmatched: unmatchedCount,
       total: linesB.length,
       targetCount,
+      isIdentical,
       unmatchedItems,
       targetMissingItems,
     });
@@ -949,6 +958,23 @@ export default function PreferenceTable({
                                   </p>
                                 </div>
 
+                                {matcherStats.isIdentical && (
+                                  <div className="border border-blue-300 bg-blue-50/95 text-blue-950 p-2.5 text-[11px] rounded flex flex-col gap-1.5 shadow-sm">
+                                    <div className="font-bold uppercase text-[11px] text-blue-900 flex items-center justify-between border-b border-blue-200 pb-1">
+                                      <span>ℹ️ Purely Identical Lists Detected</span>
+                                      <span className="text-[10px] bg-blue-200 text-blue-900 font-mono px-1.5 py-0.5 rounded">
+                                        Identical (1 to {matcherStats.total})
+                                      </span>
+                                    </div>
+                                    <p className="leading-snug text-[11px] text-blue-950 font-medium">
+                                      uh oh , itseems like you are either used wrong list to correct or you might already on the same page on your spreadsheet too ,
+                                    </p>
+                                    <p className="text-[10.5px] text-blue-800 leading-normal">
+                                      Both Target List A and Uploaded CSV List B match row-for-row in the exact same sequence (1 to {matcherStats.total}). The reorder column generated is just 1, 2, 3... in natural order.
+                                    </p>
+                                  </div>
+                                )}
+
                                 {matcherStats.unmatched > 0 && (
                                   <div className="border border-amber-300 bg-amber-50/90 text-amber-950 p-2.5 text-[11px] rounded flex flex-col gap-2">
                                     <div className="font-bold uppercase text-[11px] text-amber-900 flex items-center justify-between border-b border-amber-200 pb-1">
@@ -1453,6 +1479,23 @@ export default function PreferenceTable({
                           Click <strong>Copy Reorder Column</strong>, paste it directly next to your master spreadsheet, select all columns, and sort <strong>ASCENDING</strong> by this new column!
                         </p>
                       </div>
+
+                      {matcherStats.isIdentical && (
+                        <div className="border border-blue-300 bg-blue-50/95 text-blue-950 p-2.5 text-[11px] rounded flex flex-col gap-1.5 shadow-sm">
+                          <div className="font-bold uppercase text-[11px] text-blue-900 flex items-center justify-between border-b border-blue-200 pb-1">
+                            <span>ℹ️ Purely Identical Lists Detected</span>
+                            <span className="text-[10px] bg-blue-200 text-blue-900 font-mono px-1.5 py-0.5 rounded">
+                              Identical (1 to {matcherStats.total})
+                            </span>
+                          </div>
+                          <p className="leading-snug text-[11px] text-blue-950 font-medium">
+                            uh oh , itseems like you are either used wrong list to correct or you might already on the same page on your spreadsheet too ,
+                          </p>
+                          <p className="text-[10.5px] text-blue-800 leading-normal">
+                            Both Target List A and Uploaded CSV List B match row-for-row in the exact same sequence (1 to {matcherStats.total}). The reorder column generated is just 1, 2, 3... in natural order.
+                          </p>
+                        </div>
+                      )}
 
                       {matcherStats.unmatched > 0 && (
                         <div className="border border-amber-300 bg-amber-50/90 text-amber-950 p-2.5 text-[11px] rounded flex flex-col gap-2">
